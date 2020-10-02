@@ -1,0 +1,135 @@
+#!/bin/bash
+set -e;
+
+# Check if name is specified
+if [[ $1 == jaeger:* ]]; then
+    if [[ -z $2 ]]; then
+        echo "You must specify an app name"
+        exit 1
+    else
+        APP="$2"
+        # Check if app exists with the same name
+        if [[ -f "$DOKKU_ROOT/$APP/CONTAINER" ]]; then
+            APP_EXISTS=true
+        else
+            APP_EXISTS=false
+        fi
+    fi
+   
+
+    PLUGIN_NAME="jaeger"
+    CONTAINER_NAME="${PLUGIN_NAME}_${APP}"
+    HOST_DIR="$DOKKU_ROOT/$APP/$PLUGIN_NAME"
+    ENVVAR_NAME="JAEGER_URL"
+    COLLECTOR_ZIPKIN_HTTP_PORT=9411
+fi
+
+case "$1" in
+  jaeger:create)
+    # Check if jaeger image is built
+    IMAGE=$(docker images | grep "jaeger" | awk '{print $1}')
+    if [[ -z $IMAGE ]]; then
+        echo "jaeger image not found... Did you run 'dokku plugins-install' ?"
+        exit 1
+    fi
+
+    # Stop existing jaeger container
+    ID=$(docker ps | grep "$CONTAINER_NAME" | awk '{print $1}')
+    if [[ ! -z "$ID" ]]; then
+        docker stop $ID > /dev/null
+    fi
+
+    # Check if an existing DB volume exists
+    if [[ -d $HOST_DIR ]]; then
+        echo "-----> Reusing $CONTAINER_NAME data"
+    else
+        mkdir -p $HOST_DIR
+        chown -R dokku:dokku $HOST_DIR
+    fi
+    VOLUME="$HOST_DIR:/var/lib/jaeger"
+
+    # Launch container
+    docker run -d  --name $CONTAINER_NAME 
+    -e COLLECTOR_ZIPKIN_HTTP_PORT=$COLLECTOR_ZIPKIN_HTTP_PORT
+    -p 5775:5775/udp \
+    -p 6831:6831/udp \
+    -p 6832:6832/udp \
+    -p 5778:5778 \
+    -p 16686:16686 \
+    -p 14268:14268 \
+    -p 14250:14250 \
+    -p 9411:9411 \
+    jaegertracing/all-in-one
+
+
+    # Link to a potential existing app
+    if $APP_EXISTS; then
+        dokku jaeger:link $APP $APP
+    fi
+    echo "-----> Jaeger container created: $CONTAINER_NAME"
+    sleep 1
+    dokku jaeger:info $APP
+    ;;
+
+  jaeger:delete)
+    # Stop the container
+    ID=$(docker ps -a | grep "$CONTAINER_NAME" |  awk '{print $1}')
+    if [[ ! -z $ID ]]; then
+        docker stop $ID > /dev/null
+        docker rm $ID  > /dev/null
+    fi
+    # Remove persistent volume
+    if [[ -d $HOST_DIR ]]; then
+        rm -rf $HOST_DIR
+    fi
+
+    # unlink this container as "jaeger"
+    if $APP_EXISTS; then
+        dokku link:delete "$APP" "$CONTAINER_NAME" "$PLUGIN_NAME"
+        dokku config:unset "$APP" $ENVVAR_NAME
+    fi
+    echo "-----> Jaeger container deleted: $CONTAINER_NAME"
+    ;;
+
+  jaeger:info)
+    ID=$(docker ps -a | grep "$CONTAINER_NAME" | awk '{print $1}')
+    IP=$(docker inspect $ID | grep IPAddress | cut -d '"' -f 4)
+    echo
+    echo "       Host: ${IP}"
+    echo "       Private ports: 8529"
+    echo
+    ;;
+
+  jaeger:link)
+    if $APP_EXISTS; then
+        # Check argument
+        if [[ -z $3 ]]; then
+            echo "You must specify a container name"
+            exit 1
+        fi
+        CONTAINER_NAME="${PLUGIN_NAME}_${3}"
+
+        # link this container as "jaeger"
+        dokku link:create "$APP" "$CONTAINER_NAME" "$PLUGIN_NAME"
+
+        # figure out IP to set env var
+        ID=$(docker ps -a | grep "$CONTAINER_NAME" | awk '{print $1}')
+        IP=$(docker inspect $ID | grep IPAddress | cut -d '"' -f 4)
+        dokku config:set "$APP" $ENVVAR_NAME="http://${IP}:8529"
+        echo "-----> $APP linked to $CONTAINER_NAME container"
+    fi
+    ;;
+
+  jaeger:logs)
+    ID=$(docker ps -a | grep "$CONTAINER_NAME" |  awk '{print $1}')
+    docker logs $ID | tail -n 100
+    ;;
+  help)
+    cat && cat<<EOF
+    jaeger:create <app>                              Create a Jaeger container
+    jaeger:delete <app>                              Delete specified jaeger container
+    jaeger:info <app>                                Display container informations
+    jaeger:link <app> <container>                    Link an app to a jaeger container
+    jaeger:logs <app>                                Display last logs from jaeger container
+EOF
+    ;;
