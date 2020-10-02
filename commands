@@ -133,3 +133,5 @@ case "$1" in
     jaeger:logs <app>                                Display last logs from jaeger container
 EOF
     ;;
+
+    esac
